@@ -6,6 +6,8 @@
 #include <string>
 #include <iomanip>
 #include <sstream>
+#include <io.h>
+#include <fcntl.h>
 
 #define DEBUGGER "windbgx" // DEBUGGER PATH
 
@@ -91,7 +93,6 @@ std::stringstream do_hexdump(const char* data, const size_t sz)
     return os;
 }
 
-
 class Process {
 private:
     char* CommandLine;
@@ -101,6 +102,7 @@ private:
     SECURITY_ATTRIBUTES sa;
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
+    BOOL alive; //check process alive
 public:
     // Create new process via command-line cmd
     Process(const char* cmd) {
@@ -134,6 +136,7 @@ public:
         si.cb = sizeof(STARTUPINFO);
         si.hStdInput = hRead_inPipe;
         si.hStdOutput = hWrite_outPipe;
+        si.hStdError = hWrite_outPipe;
         si.dwFlags |= STARTF_USESTDHANDLES;
 
         // Create the child process
@@ -141,6 +144,7 @@ public:
             fprintf(stderr, "Error creating child process\n");
             exit(-1);
         }
+        alive = TRUE;
         logOK("Process started! PID: %ld with Handle: %p", pi.dwProcessId, pi.hProcess);
 #ifdef DEBUG
         logInfo("TID: %ld with Handle %p", pi.dwThreadId, pi.hThread);
@@ -167,6 +171,41 @@ public:
     // TID of the process
     DWORD TID() {
         return pi.dwThreadId;
+    }
+
+    //Handle process
+    HANDLE hProcess() {
+        return pi.hProcess;
+    }
+
+    //Handle thread
+    HANDLE hThread() {
+        return pi.hThread;
+    }
+
+    // Handle child's stdout
+    HANDLE hOutPipe(){
+        return hRead_outPipe;
+    }
+
+    // Count read bytes from child's stdout
+    DWORD* pNumRead() {
+        return &dwRead;
+    }
+
+    // Handle child's stdin
+    HANDLE hInPipe() {
+        return hWrite_inPipe;
+    }
+
+    // Count written bytes to child's stdin
+    DWORD* pNumWritten() {
+        return &dwWritten;
+    }
+
+    // Check process alives or not
+    BOOL* pAlive() {
+        return &alive;
     }
 
     //This method does not send the NULL byte. Use std::vector<char> or std::string if you want to do that.
@@ -207,7 +246,7 @@ public:
     void send(const std::string& buf) {
 
         if (buf.length() > 0xffffffff) {
-            logWarn("Buffer too long! Sending first 4294967295 bytes of the buffer.");
+            logWarn("Buffer too long! Sending the first 4294967295 bytes of the buffer.");
         }
 
 
@@ -243,7 +282,7 @@ public:
         buf2send.push_back('\n');
 
         if (buf2send.size() > 0xffffffff) {
-            logWarn("Buffer too long! Sending first 4294967295 bytes of the buffer.");
+            logWarn("Buffer too long! Sending the first 4294967295 bytes of the buffer.");
         }
 
         if (!WriteFile(hWrite_inPipe, buf2send.data(), (DWORD)buf2send.size(), &dwWritten, NULL)) {
@@ -262,7 +301,7 @@ public:
         buf2send += '\n';
 
         if (buf2send.length() > 0xffffffff) {
-            logWarn("Buffer too long! Sending first 4294967295 bytes of the buffer.");
+            logWarn("Buffer too long! Sending the first 4294967295 bytes of the buffer.");
         }
 
         if (!WriteFile(hWrite_inPipe, buf2send.c_str(), (DWORD)buf2send.length(), &dwWritten, NULL)) {
@@ -275,7 +314,70 @@ public:
 #endif    
     }
 
-    std::string recv(size_t size = 0x1000) {
+    /* Use a thread routine to handle timeout
+    1st argv -> buf
+    2st argv -> size
+    3rd argv -> obj
+    */
+    static DWORD WINAPI recv_routine(LPVOID lpdwThreadParam) {
+
+        uint64_t* argv = (uint64_t*)lpdwThreadParam;
+        char* buf2read = (char*)argv[0];
+        size_t size2read = argv[1];
+        Process* obj = (Process*)argv[2];
+
+        if (size2read >= 0xffffffff) {
+            logWarn("Buffer too long! Only recv 4294967294 bytes.");
+            size2read = 0xfffffffe;
+        }
+
+        // Check if the process is still alive. If not don't try to read buffer anymore.
+        if (*obj->pAlive() == FALSE) {
+            *obj->pNumRead() = -1; // SET EOF
+            return -1;
+        }
+        DWORD dwWaitResult = WaitForSingleObject(obj->hProcess(), 0);
+        if (dwWaitResult != WAIT_TIMEOUT) { // Process died
+            if (dwWaitResult == WAIT_OBJECT_0) {
+                DWORD dwExitCode;
+                if (GetExitCodeProcess(obj->hProcess(), &dwExitCode)) {
+                    logWarn("Process %d exited with code %d.", obj->PID(), dwExitCode);
+                    logWarn("Now reading stdout of the process until the end!");
+                    *obj->pNumRead() = -1; // SET EOF
+                    *obj->pAlive() = FALSE;
+                    size2read += 0x3000; // resize bigger TODO: better handle this senario
+                    char* buf2end = (char*)calloc(1,size2read);
+                    if (buf2end == NULL) {
+                        logErr("Can't allocate memory!");
+                        exit(-1);
+                    }
+                    if (!ReadFile(obj->hOutPipe(), buf2end, (DWORD)size2read, obj->pNumRead(), NULL)) {
+                        fprintf(stderr, "Error reading from pipe\n");
+                        exit(-1);
+                    }
+#ifdef DEBUG
+                    log("%s", do_hexdump(buf2end, *obj->pNumRead()).str().c_str());
+#else
+                    logInfo("%s", buf2end);
+#endif
+                    free(buf2end);
+                    return -1;
+                }
+                else {
+                    logErr("Failed to get process %d exit code.", obj->PID());
+                    return -1;
+                }
+            }
+        }
+
+        if (!ReadFile(obj->hOutPipe(), buf2read, (DWORD)size2read, obj->pNumRead(), NULL)) {
+            fprintf(stderr, "Error reading from pipe\n");
+            exit(-1);
+        }
+        return 0;
+    }
+
+    std::string recv(size_t size = 0x1000,DWORD timeout = INFINITE) {
 
         char* buf = (char*)malloc(size);
 
@@ -286,14 +388,39 @@ public:
 
         ZeroMemory(buf, size);
 
-        if (size > 0xffffffff) {
-            logWarn("Buffer too long! Sending first 4294967295 bytes of the buffer.");
-        }
+        dwRead = -1;
 
-        if (!ReadFile(hRead_outPipe, buf, (DWORD)size , &dwRead, NULL)) {
-            fprintf(stderr, "Error reading from pipe\n");
+        HANDLE readThread;
+        DWORD readThreadId;
+
+        uint64_t argv[3] = {
+            (uint64_t)buf,
+            size,
+            (uint64_t)this
+        };
+
+        readThread = CreateThread(NULL, 0, recv_routine, argv, 0, &readThreadId);
+
+        if (readThread == NULL) {
+            logErr("Can't create thread");
             exit(-1);
         }
+
+        DWORD dwWaitResult = WaitForSingleObject(readThread, timeout);
+
+        CloseHandle(readThread);
+
+        if (dwWaitResult == WAIT_TIMEOUT) {
+            free(buf);
+            return "";
+        }
+
+        if (dwRead == -1) {
+            logWarn("Got EOF while reading from stdout of the process!");
+            free(buf);
+            return "";
+        }
+
         std::string ret(buf, dwRead);
         free(buf);
 #ifdef DEBUG
@@ -303,7 +430,8 @@ public:
         return ret;
     }
 
-    std::string recvuntil(const char* pattern, size_t size = 0x1000) {
+    std::string recvuntil(const char* pattern, size_t size = 0x1000, DWORD timeout = INFINITE) {
+
         if (strlen(pattern) > size)
             size = strlen(pattern) + 0x1000;
 
@@ -332,9 +460,37 @@ public:
                 buf = pTmp;
                 ZeroMemory(buf + offset, 0x1000);
             }
-            if (!ReadFile(hRead_outPipe, buf + offset, 1, &dwRead, NULL)) {
-                fprintf(stderr, "Error reading from pipe.\n");
+            HANDLE readThread;
+            DWORD readThreadId;
+
+            uint64_t argv[3] = {
+                (uint64_t)buf+offset,
+                1,
+                (uint64_t)this
+            };
+
+            dwRead = -1;
+
+            readThread = CreateThread(NULL, 0, recv_routine, argv, 0, &readThreadId); // read 1 byte and store it to buf+offset
+
+            if (readThread == NULL) {
+                logErr("Can't create thread");
                 exit(-1);
+            }
+
+            DWORD dwWaitResult = WaitForSingleObject(readThread, timeout);
+
+            CloseHandle(readThread);
+
+            if (dwWaitResult == WAIT_TIMEOUT) {
+                free(buf);
+                return "";
+            }
+
+            if (dwRead == -1) {
+                logWarn("Got EOF while reading from stdout of the process!");
+                free(buf);
+                return "";
             }
             ++offset;
         }
@@ -377,9 +533,49 @@ public:
         sendline(buf2send);
     }
 
-    //Todo: interactive()
+    // receive thread for interactation
+    static DWORD WINAPI recvThread(LPVOID lpdwThreadParam) {
+        uint64_t* argv = (uint64_t*)lpdwThreadParam;
+
+        Process* obj = (Process*)argv[0];
+        while (*obj->pAlive()) {
+            size_t size = 0x1000;
+            char* buf2read = (char*)calloc(1, size);
+            uint64_t argv[3] = {
+                (uint64_t)buf2read,
+                size,
+                (uint64_t)obj
+            };
+            *obj->pNumRead() = 0;
+            recv_routine(argv);
+            if (*obj->pNumRead() > 0) {
+#ifdef DEBUG
+                log("%s", do_hexdump(buf2read, *obj->pNumRead()).str().c_str());
+#endif
+                printf("%s",buf2read);
+                free(buf2read);
+            }
+            if (*obj->pNumRead() == -1)
+                return -1;
+        }
+        return 0;
+    }
+
     void interactive() {
-        return;
+        
+        HANDLE hRecvThread;
+        DWORD dwRecvThreadId;
+        uint64_t argv[1] = { (uint64_t)this };
+        hRecvThread = CreateThread(NULL, 0, recvThread, &argv, 0, &dwRecvThreadId);
+        if (hRecvThread == NULL) {
+            logErr("Can't create thread!");
+            exit(-1);
+        }
+        while (alive) {
+            std::string cmd;
+            std::getline(std::cin, cmd);
+            sendline(cmd);
+        }
     }
 
 };
