@@ -535,9 +535,9 @@ public:
 
     // receive thread for interactation
     static DWORD WINAPI recvThread(LPVOID lpdwThreadParam) {
-        uint64_t* argv = (uint64_t*)lpdwThreadParam;
 
-        Process* obj = (Process*)argv[0];
+        Process* obj = (Process*)lpdwThreadParam;
+
         while (*obj->pAlive()) {
             size_t size = 0x1000;
             char* buf2read = (char*)calloc(1, size);
@@ -567,8 +567,8 @@ public:
         HANDLE hRecvThread;
         DWORD dwRecvThreadId;
         DWORD dwWaitResult;
-        uint64_t argv[1] = { (uint64_t)this };
-        hRecvThread = CreateThread(NULL, 0, recvThread, &argv, 0, &dwRecvThreadId);
+
+        hRecvThread = CreateThread(NULL, 0, recvThread, this, 0, &dwRecvThreadId);
         if (hRecvThread == NULL) {
             logErr("Can't create thread!");
             exit(-1);
@@ -578,6 +578,7 @@ public:
             std::getline(std::cin, cmd);
             sendline(cmd);
         }
+        CloseHandle(hRecvThread);
     }
 
 };

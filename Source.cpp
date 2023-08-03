@@ -1,13 +1,15 @@
 #undef UNICODE
-#undef DEBUG
 #include <iostream>
+#define DEBUG
 #include "pwn.h"
-#undef DEBUG
+
 int main(int argc, char** argv, char** envp) {
 
-	Process* p = new Process("cmd.exe");
+	Process* p = new Process("python.exe -i");
 
-	std::string bufRecv = p->recvuntil(">");
+	p->sendline("print('A'*0x10)");
+
+	p->recvuntil("A\r\n");
 
 	p->interactive();
 
