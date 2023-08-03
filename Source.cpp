@@ -1,8 +1,8 @@
 #undef UNICODE
+#undef DEBUG
 #include <iostream>
-#define DEBUG
 #include "pwn.h"
-#define DEBUG
+#undef DEBUG
 int main(int argc, char** argv, char** envp) {
 
 	Process* p = new Process("cmd.exe");

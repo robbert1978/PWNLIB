@@ -547,6 +547,7 @@ public:
                 (uint64_t)obj
             };
             *obj->pNumRead() = 0;
+            Sleep(1);
             recv_routine(argv);
             if (*obj->pNumRead() > 0) {
 #ifdef DEBUG
@@ -565,6 +566,7 @@ public:
         
         HANDLE hRecvThread;
         DWORD dwRecvThreadId;
+        DWORD dwWaitResult;
         uint64_t argv[1] = { (uint64_t)this };
         hRecvThread = CreateThread(NULL, 0, recvThread, &argv, 0, &dwRecvThreadId);
         if (hRecvThread == NULL) {
