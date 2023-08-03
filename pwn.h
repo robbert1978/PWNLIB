@@ -97,7 +97,7 @@ class Process {
 private:
     char* CommandLine;
     HANDLE hRead_inPipe, hWrite_inPipe; // Handle child's stdin
-    HANDLE hRead_outPipe, hWrite_outPipe; // Handle child's stdout
+    HANDLE hRead_outPipe, hWrite_outPipe; // Handle child's stdout and stderr
     DWORD dwRead, dwWritten; // number of bytes for read/write
     SECURITY_ATTRIBUTES sa;
     STARTUPINFO si;
